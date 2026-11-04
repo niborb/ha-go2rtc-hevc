@@ -20,7 +20,7 @@ type reorder[T any] struct {
 	held    map[uint16]T
 	since   time.Time
 
-	Held, Late, Lost int
+	Held, Filled, Late, Lost, Gaps, MaxGap int
 }
 
 func newReorder[T any](maxHeld int, maxWait time.Duration) *reorder[T] {
@@ -46,6 +46,9 @@ func (r *reorder[T]) add(seq uint16, item T, now time.Time, emit func(T), lost f
 	case d < 0:
 		r.Late++ // a duplicate, or it comes after we gave up on it
 	case d == 0:
+		if len(r.held) > 0 {
+			r.Filled++ // a late packet closed a gap
+		}
 		emit(item)
 		r.next++
 		r.flush(now, emit)
@@ -83,6 +86,10 @@ func (r *reorder[T]) skipGap(now time.Time, emit func(T), lost func()) {
 	for gap := 1; gap < 1<<16; gap++ {
 		if _, ok := r.held[r.next+uint16(gap)]; ok {
 			r.Lost += gap
+			r.Gaps++
+			if gap > r.MaxGap {
+				r.MaxGap = gap
+			}
 			r.next += uint16(gap)
 			break
 		}

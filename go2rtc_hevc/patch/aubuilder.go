@@ -17,7 +17,7 @@ type auBuilder struct {
 	hasKey  bool // this frame is a keyframe
 	needKey bool // nothing can be decoded until the next keyframe
 
-	Frames, Dropped int
+	Frames, Dropped, Keys, KeysDamaged int
 }
 
 func newAUBuilder(ps []byte) *auBuilder {
@@ -37,6 +37,9 @@ func (a *auBuilder) clear() {
 
 // lost tells that packets went missing.
 func (a *auBuilder) lost() {
+	if a.hasKey {
+		a.KeysDamaged++
+	}
 	a.clear()
 	a.broken = true
 	a.needKey = true
@@ -73,6 +76,13 @@ func (a *auBuilder) add(data []byte, marker bool, ts uint32) []byte {
 	au := a.buf
 	damaged := a.broken || a.inFU
 	wanted := !damaged && len(au) > 0 && (!a.needKey || a.hasKey)
+	if a.hasKey {
+		if damaged {
+			a.KeysDamaged++
+		} else {
+			a.Keys++
+		}
+	}
 	if damaged {
 		a.needKey = true
 	} else if wanted {

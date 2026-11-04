@@ -13,7 +13,7 @@ What the patch changes in go2rtc:
 - **Aggregation packets.** RFC 7798 packets with several NAL units are split up, the same fix as upstream
   [PR 2296](https://github.com/AlexxIT/go2rtc/pull/2296).
 
-Once a minute the log shows counters: `[h265] frames=… dropped=… held=… late=… lost=…`.
+Every 10 seconds the log shows counters: `[h265] frames=… dropped=… keys=… keysDamaged=… held=… filled=… late=… lost=… gaps=… maxGap=…`.
 
 The build runs the tests in `go2rtc_hevc/patch/depay_test.go`, and stops if they fail.
 

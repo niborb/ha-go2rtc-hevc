@@ -38,7 +38,7 @@
  			case NALUTypeVPS, NALUTypeSPS, NALUTypePPS:
  				packet.Marker = false
  			case NALUTypePrefixSEI, NALUTypeSuffixSEI:
-@@ -35,82 +32,28 @@
+@@ -35,82 +32,29 @@
  			}
  		}
  
@@ -121,7 +121,7 @@
 +	}
  
 -		buf = buf[:0]
-+	report := time.Now().Add(time.Minute)
++	report := time.Now().Add(10 * time.Second)
  
 -		handler(&clone)
 +	return func(packet *rtp.Packet) {
@@ -129,9 +129,10 @@
 +		order.add(packet.SequenceNumber, packet, now, depay, builder.lost)
 +
 +		if now.After(report) {
-+			report = now.Add(time.Minute)
-+			log.Printf("[h265] frames=%d dropped=%d held=%d late=%d lost=%d",
-+				builder.Frames, builder.Dropped, order.Held, order.Late, order.Lost)
++			report = now.Add(10 * time.Second)
++			log.Printf("[h265] frames=%d dropped=%d keys=%d keysDamaged=%d held=%d filled=%d late=%d lost=%d gaps=%d maxGap=%d",
++				builder.Frames, builder.Dropped, builder.Keys, builder.KeysDamaged,
++				order.Held, order.Filled, order.Late, order.Lost, order.Gaps, order.MaxGap)
 +		}
  	}
  }
