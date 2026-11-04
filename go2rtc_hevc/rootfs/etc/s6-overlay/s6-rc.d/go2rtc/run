@@ -21,6 +21,9 @@ umask 077
     done
 } > "${CONFIG}"
 
+if bashio::config.true 'h265_only'; then
+    export H265_ONLY=1
+fi
 export H265_KEY_WAIT_MS="$(bashio::config 'key_wait_ms')"
 export H265_REORDER_WAIT_MS="$(bashio::config 'reorder_wait_ms')"
 export H265_PLI_MS="$(bashio::config 'keyframe_request_ms')"

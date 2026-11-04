@@ -9,7 +9,7 @@
  
  	"github.com/AlexxIT/go2rtc/pkg/core"
  	"github.com/AlexxIT/go2rtc/pkg/h264"
-@@ -10,24 +12,27 @@
+@@ -10,24 +12,28 @@
  
  func RTPDepay(codec *core.Codec, handler core.HandlerFunc) core.HandlerFunc {
  	vps, sps, pps := GetParameterSet(codec.FmtpLine)
@@ -22,6 +22,7 @@
 +	order := newReorder[*rtp.Packet](reorderMaxHeld, envMillis("H265_REORDER_WAIT_MS", reorderMaxWait))
  
 -	return func(packet *rtp.Packet) {
++	otherCodec := 0
 +	losses := 0
 +	lost := func() {
 +		builder.lost()
@@ -46,7 +47,7 @@
  			case NALUTypeVPS, NALUTypeSPS, NALUTypePPS:
  				packet.Marker = false
  			case NALUTypePrefixSEI, NALUTypeSuffixSEI:
-@@ -35,82 +40,29 @@
+@@ -35,82 +41,33 @@
  			}
  		}
  
@@ -61,12 +62,18 @@
  		}
  
 -		seqNum = packet.SequenceNumber
--
++		clone := *packet
++		clone.Version = h264.RTPPacketVersionAVC
++		clone.Payload = au
++		handler(&clone)
++	}
+ 
 -		if nuType == NALUTypeFU {
 -			switch data[2] >> 6 {
 -			case 0b10: // begin
 -				nuType = data[2] & 0x3F
--
++	report := time.Now().Add(10 * time.Second)
+ 
 -				// push PS data before keyframe
 -				if len(buf) == 0 && nuType >= 19 && nuType <= 21 {
 -					buf = append(buf, ps...)
@@ -116,47 +123,66 @@
 -
 -		// collect all NAL Units for Access Unit
 -		if !packet.Marker {
--			return
--		}
--
--		//log.Printf("[HEVC] %v, len: %d", Types(buf), len(buf))
--
- 		clone := *packet
- 		clone.Version = h264.RTPPacketVersionAVC
--		clone.Payload = buf
-+		clone.Payload = au
-+		handler(&clone)
-+	}
- 
--		buf = buf[:0]
-+	report := time.Now().Add(10 * time.Second)
- 
--		handler(&clone)
 +	return func(packet *rtp.Packet) {
 +		now := time.Now()
++		if packet.PayloadType != codec.PayloadType {
++			otherCodec++ // the camera switched codec on this stream: this is not H.265, whatever its bytes look like
+ 			return
+ 		}
 +		order.add(packet.SequenceNumber, packet, now, depay, lost)
-+
+ 
+-		//log.Printf("[HEVC] %v, len: %d", Types(buf), len(buf))
+-
+-		clone := *packet
+-		clone.Version = h264.RTPPacketVersionAVC
+-		clone.Payload = buf
+-
+-		buf = buf[:0]
+-
+-		handler(&clone)
 +		if now.After(report) {
 +			report = now.Add(10 * time.Second)
-+			log.Printf("[h265] frames=%d dropped=%d keys=%d keysDamaged=%d resumed=%d held=%d filled=%d late=%d lost=%d gaps=%d maxGap=%d",
++			log.Printf("[h265] frames=%d dropped=%d keys=%d keysDamaged=%d resumed=%d held=%d filled=%d late=%d lost=%d gaps=%d maxGap=%d otherCodec=%d",
 +				builder.Frames, builder.Dropped, builder.Keys, builder.KeysDamaged, builder.Resumed,
-+				order.Held, order.Filled, order.Late, order.Lost, order.Gaps, order.MaxGap)
++				order.Held, order.Filled, order.Late, order.Lost, order.Gaps, order.MaxGap, otherCodec)
 +		}
  	}
  }
  
+--- a/pkg/webrtc/api.go
++++ b/pkg/webrtc/api.go
+@@ -3,6 +3,7 @@
+ import (
+ 	"fmt"
+ 	"net"
++	"os"
+ 	"slices"
+ 
+ 	"github.com/AlexxIT/go2rtc/pkg/core"
+@@ -307,6 +308,11 @@
+ 			PayloadType: 100,
+ 		},
+ 	} {
++		// A camera that is offered more than one codec can switch between them in mid-stream, and a viewer of one track cannot
++		// follow that. Seen with a Ring camera: H.265 for a while, then H.264 on the same stream.
++		if os.Getenv("H265_ONLY") != "" && codec.MimeType != webrtc.MimeTypeH265 {
++			continue
++		}
+ 		if err := m.RegisterCodec(codec, webrtc.RTPCodecTypeVideo); err != nil {
+ 			return err
+ 		}
 --- a/pkg/webrtc/conn.go
 +++ b/pkg/webrtc/conn.go
-@@ -4,6 +4,9 @@
+@@ -3,6 +3,9 @@
+ import (
  	"encoding/json"
  	"fmt"
- 	"strings"
 +	"log"
 +	"os"
 +	"strconv"
+ 	"strings"
  	"time"
  
- 	"github.com/AlexxIT/go2rtc/pkg/core"
 @@ -87,12 +90,23 @@
  			}
  		}
