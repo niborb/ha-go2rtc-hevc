@@ -9,7 +9,7 @@
  
  	"github.com/AlexxIT/go2rtc/pkg/core"
  	"github.com/AlexxIT/go2rtc/pkg/h264"
-@@ -10,24 +12,19 @@
+@@ -10,24 +12,27 @@
  
  func RTPDepay(codec *core.Codec, handler core.HandlerFunc) core.HandlerFunc {
  	vps, sps, pps := GetParameterSet(codec.FmtpLine)
@@ -18,10 +18,18 @@
 -	buf := make([]byte, 0, 512*1024) // 512K
 -	var nuStart int
 -	var seqNum uint16
-+	builder := newAUBuilder(h264.JoinNALU(vps, sps, pps))
-+	order := newReorder[*rtp.Packet](reorderMaxHeld, reorderMaxWait)
++	builder := newAUBuilder(h264.JoinNALU(vps, sps, pps), envMillis("H265_KEY_WAIT_MS", keyMaxWait))
++	order := newReorder[*rtp.Packet](reorderMaxHeld, envMillis("H265_REORDER_WAIT_MS", reorderMaxWait))
  
 -	return func(packet *rtp.Packet) {
++	losses := 0
++	lost := func() {
++		builder.lost()
++		if losses++; losses <= 50 {
++			log.Printf("[h265] loss %d: %d packets", losses, order.LastGap)
++		}
++	}
++
 +	depay := func(packet *rtp.Packet) {
  		data := packet.Payload
  		if len(data) < 3 {
@@ -38,7 +46,7 @@
  			case NALUTypeVPS, NALUTypeSPS, NALUTypePPS:
  				packet.Marker = false
  			case NALUTypePrefixSEI, NALUTypeSuffixSEI:
-@@ -35,82 +32,29 @@
+@@ -35,82 +40,29 @@
  			}
  		}
  
@@ -47,7 +55,7 @@
 -		if len(buf) > 0 && packet.SequenceNumber-seqNum != 1 {
 -			//log.Printf("broken H265 sequence")
 -			buf = buf[:0] // drop data
-+		au := builder.add(data, packet.Marker, packet.Timestamp)
++		au := builder.add(data, packet.Marker, packet.Timestamp, time.Now())
 +		if au == nil {
  			return
  		}
@@ -126,12 +134,12 @@
 -		handler(&clone)
 +	return func(packet *rtp.Packet) {
 +		now := time.Now()
-+		order.add(packet.SequenceNumber, packet, now, depay, builder.lost)
++		order.add(packet.SequenceNumber, packet, now, depay, lost)
 +
 +		if now.After(report) {
 +			report = now.Add(10 * time.Second)
-+			log.Printf("[h265] frames=%d dropped=%d keys=%d keysDamaged=%d held=%d filled=%d late=%d lost=%d gaps=%d maxGap=%d",
-+				builder.Frames, builder.Dropped, builder.Keys, builder.KeysDamaged,
++			log.Printf("[h265] frames=%d dropped=%d keys=%d keysDamaged=%d resumed=%d held=%d filled=%d late=%d lost=%d gaps=%d maxGap=%d",
++				builder.Frames, builder.Dropped, builder.Keys, builder.KeysDamaged, builder.Resumed,
 +				order.Held, order.Filled, order.Late, order.Lost, order.Gaps, order.MaxGap)
 +		}
  	}
@@ -139,7 +147,17 @@
  
 --- a/pkg/webrtc/conn.go
 +++ b/pkg/webrtc/conn.go
-@@ -87,7 +87,9 @@
+@@ -4,6 +4,9 @@
+ 	"encoding/json"
+ 	"fmt"
+ 	"strings"
++	"log"
++	"os"
++	"strconv"
+ 	"time"
+ 
+ 	"github.com/AlexxIT/go2rtc/pkg/core"
+@@ -87,12 +90,23 @@
  			}
  		}
  
@@ -148,5 +166,20 @@
 +		// next keyframe, so they should not be far apart.
 +		if (c.Mode == core.ModePassiveProducer || c.Mode == core.ModeActiveProducer) && remote.Kind() == webrtc.RTPCodecTypeVideo {
  			go func() {
++				every := 2 * time.Second
++				if v, err := strconv.Atoi(os.Getenv("H265_PLI_MS")); err == nil && v > 0 {
++					every = time.Duration(v) * time.Millisecond
++				}
  				pkts := []rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())}}
- 				for range time.NewTicker(time.Second * 2).C {
+-				for range time.NewTicker(time.Second * 2).C {
++				sent := 0
++				for range time.NewTicker(every).C {
+ 					if err := pc.WriteRTCP(pkts); err != nil {
++						log.Printf("[webrtc] keyframe request stopped after %d: %v", sent, err)
+ 						return
++					}
++					if sent++; sent%30 == 1 {
++						log.Printf("[webrtc] keyframe request %d, ssrc=%d", sent, uint32(remote.SSRC()))
+ 					}
+ 				}
+ 			}()

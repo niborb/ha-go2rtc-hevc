@@ -21,4 +21,8 @@ umask 077
     done
 } > "${CONFIG}"
 
+export H265_KEY_WAIT_MS="$(bashio::config 'key_wait_ms')"
+export H265_REORDER_WAIT_MS="$(bashio::config 'reorder_wait_ms')"
+export H265_PLI_MS="$(bashio::config 'keyframe_request_ms')"
+
 exec go2rtc -config "${CONFIG}"

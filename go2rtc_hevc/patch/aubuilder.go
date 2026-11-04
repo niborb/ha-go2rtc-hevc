@@ -1,12 +1,19 @@
 package h265
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"time"
+)
 
 const naluTypeAP = 48 // RFC 7798 aggregation packet: several NAL units in one RTP packet
 
+// How long to wait for a keyframe after a loss. Some cameras seldom send one, so waiting without limit can freeze the picture
+// for good. H265_KEY_WAIT_MS overrides this.
+const keyMaxWait = time.Second
+
 // auBuilder puts RTP payloads together into access units (frames) of length-prefixed NAL units. A frame with a part missing
-// is thrown away, and so is everything after it until the next keyframe, because those frames refer to what was lost: a
-// decoder given them shows corrupted video or stops, where a short freeze is harmless.
+// is thrown away, and everything after it too until the next keyframe or keyWait, because those frames refer to what was
+// lost: a short freeze is better than corrupted video.
 type auBuilder struct {
 	ps      []byte // parameter sets from the SDP, put before a keyframe
 	buf     []byte
@@ -16,12 +23,22 @@ type auBuilder struct {
 	broken  bool // this frame misses a part
 	hasKey  bool // this frame is a keyframe
 	needKey bool // nothing can be decoded until the next keyframe
+	keyWait time.Duration
+	since   time.Time // when needKey began
+	now     time.Time
 
-	Frames, Dropped, Keys, KeysDamaged int
+	Frames, Dropped, Keys, KeysDamaged, Resumed int
 }
 
-func newAUBuilder(ps []byte) *auBuilder {
-	return &auBuilder{ps: ps, buf: make([]byte, 0, 512*1024)}
+func newAUBuilder(ps []byte, keyWait time.Duration) *auBuilder {
+	return &auBuilder{ps: ps, buf: make([]byte, 0, 512*1024), keyWait: keyWait}
+}
+
+func (a *auBuilder) waitForKey() {
+	if !a.needKey {
+		a.needKey = true
+		a.since = a.now
+	}
 }
 
 func isIRAP(nuType byte) bool {
@@ -42,11 +59,12 @@ func (a *auBuilder) lost() {
 	}
 	a.clear()
 	a.broken = true
-	a.needKey = true
+	a.waitForKey()
 }
 
 // add returns a finished frame, valid until the next call, or nil.
-func (a *auBuilder) add(data []byte, marker bool, ts uint32) []byte {
+func (a *auBuilder) add(data []byte, marker bool, ts uint32, now time.Time) []byte {
+	a.now = now
 	if len(data) < 3 {
 		return nil
 	}
@@ -75,6 +93,10 @@ func (a *auBuilder) add(data []byte, marker bool, ts uint32) []byte {
 
 	au := a.buf
 	damaged := a.broken || a.inFU
+	if !damaged && a.needKey && !a.hasKey && now.Sub(a.since) >= a.keyWait {
+		a.needKey = false
+		a.Resumed++
+	}
 	wanted := !damaged && len(au) > 0 && (!a.needKey || a.hasKey)
 	if a.hasKey {
 		if damaged {
@@ -84,7 +106,7 @@ func (a *auBuilder) add(data []byte, marker bool, ts uint32) []byte {
 		}
 	}
 	if damaged {
-		a.needKey = true
+		a.waitForKey()
 	} else if wanted {
 		a.needKey = false
 	}

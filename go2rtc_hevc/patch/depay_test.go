@@ -80,9 +80,9 @@ func TestLossDropsUntilNextKeyframe(t *testing.T) {
 	var frames [][]byte
 	now := time.Unix(100, 0)
 	r := newReorder[*rtp.Packet](reorderMaxHeld, reorderMaxWait)
-	a := newAUBuilder(nil)
+	a := newAUBuilder(nil, time.Hour)
 	emit := func(p *rtp.Packet) {
-		if au := a.add(p.Payload, p.Marker, p.Timestamp); au != nil {
+		if au := a.add(p.Payload, p.Marker, p.Timestamp, now); au != nil {
 			frames = append(frames, append([]byte(nil), au...))
 		}
 	}
@@ -121,13 +121,13 @@ func TestLossDropsUntilNextKeyframe(t *testing.T) {
 }
 
 func TestLostMarkerDoesNotLoseTheNextFrame(t *testing.T) {
-	a := newAUBuilder(nil)
+	a := newAUBuilder(nil, time.Hour)
 	first := frame(1, 1000, typeP, 2)
-	a.add(first[0].Payload, false, 1000)
+	a.add(first[0].Payload, false, 1000, time.Unix(100, 0))
 	a.lost() // the rest, with the marker, is gone
 	var out []byte
 	for _, p := range frame(5, 2000, typeIDR, 2) {
-		if au := a.add(p.Payload, p.Marker, p.Timestamp); au != nil {
+		if au := a.add(p.Payload, p.Marker, p.Timestamp, time.Unix(100, 0)); au != nil {
 			out = au
 		}
 	}
@@ -183,20 +183,49 @@ func TestHoldsNoMoreThanTheLimit(t *testing.T) {
 }
 
 func TestAggregationPacket(t *testing.T) {
-	a := newAUBuilder(nil)
+	a := newAUBuilder(nil, time.Hour)
 	data := []byte{naluTypeAP << 1, 1}
 	for _, n := range [][]byte{{NALUTypeVPS << 1, 1, 9}, {NALUTypeSPS << 1, 1, 8, 8}, {typeIDR << 1, 1, 7}} {
 		data = binary.BigEndian.AppendUint16(data, uint16(len(n)))
 		data = append(data, n...)
 	}
-	au := a.add(data, true, 1)
+	au := a.add(data, true, 1, time.Unix(100, 0))
 	want := []byte{0, 0, 0, 3, NALUTypeVPS << 1, 1, 9, 0, 0, 0, 4, NALUTypeSPS << 1, 1, 8, 8, 0, 0, 0, 3, typeIDR << 1, 1, 7}
 	if !bytes.Equal(au, want) {
 		t.Fatalf("got %v", au)
 	}
 
-	a = newAUBuilder(nil)
-	if au := a.add([]byte{naluTypeAP << 1, 1, 0, 200, 1, 2}, true, 1); au != nil {
+	a = newAUBuilder(nil, time.Hour)
+	if au := a.add([]byte{naluTypeAP << 1, 1, 0, 200, 1, 2}, true, 1, time.Unix(100, 0)); au != nil {
 		t.Fatalf("truncated aggregation packet gave %v", au)
+	}
+}
+
+func TestResumesWithoutKeyframeAfterTheWait(t *testing.T) {
+	now := time.Unix(100, 0)
+	a := newAUBuilder(nil, time.Second)
+	push := func(ps []*rtp.Packet) (out int) {
+		for _, p := range ps {
+			if a.add(p.Payload, p.Marker, p.Timestamp, now) != nil {
+				out++
+			}
+		}
+		return
+	}
+	push(frame(1, 1000, typeP, 2))
+	a.lost()
+	if n := push(frame(3, 2000, typeP, 2)); n != 0 {
+		t.Fatal("a frame right after a loss was shown")
+	}
+	now = now.Add(500 * time.Millisecond)
+	if n := push(frame(5, 3000, typeP, 2)); n != 0 {
+		t.Fatal("a frame within the wait was shown")
+	}
+	now = now.Add(600 * time.Millisecond)
+	if n := push(frame(7, 4000, typeP, 2)); n != 1 {
+		t.Fatal("no frame after the wait")
+	}
+	if a.Resumed != 1 {
+		t.Fatalf("resumed %d", a.Resumed)
 	}
 }
