@@ -1,0 +1,24 @@
+#!/command/with-contenv bashio
+# The config is written from the add-on's options at each start and stays in the add-on's private /data folder. Without a
+# password the API would be open to the whole network, so the add-on refuses to start.
+bashio::config.require 'api_password'
+
+CONFIG=/data/go2rtc.yaml
+umask 077
+{
+    echo "api:"
+    echo "  listen: \":$(bashio::config 'api_port')\""
+    echo "  username: \"$(bashio::config 'api_username')\""
+    echo "  password: \"$(bashio::config 'api_password')\""
+    echo "  origin: \"*\""
+    echo "rtsp:"
+    echo "  listen: \"\""
+    echo "webrtc:"
+    echo "  listen: \"\""
+    echo "streams:"
+    for i in $(bashio::config 'streams|keys'); do
+        echo "  $(bashio::config "streams[${i}].name"): '$(bashio::config "streams[${i}].url")'"
+    done
+} > "${CONFIG}"
+
+exec go2rtc -config "${CONFIG}"

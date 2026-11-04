@@ -1,0 +1,151 @@
+--- a/pkg/h265/rtp.go
++++ b/pkg/h265/rtp.go
+@@ -2,6 +2,8 @@
+ 
+ import (
+ 	"encoding/binary"
++	"log"
++	"time"
+ 
+ 	"github.com/AlexxIT/go2rtc/pkg/core"
+ 	"github.com/AlexxIT/go2rtc/pkg/h264"
+@@ -10,24 +12,19 @@
+ 
+ func RTPDepay(codec *core.Codec, handler core.HandlerFunc) core.HandlerFunc {
+ 	vps, sps, pps := GetParameterSet(codec.FmtpLine)
+-	ps := h264.JoinNALU(vps, sps, pps)
+ 
+-	buf := make([]byte, 0, 512*1024) // 512K
+-	var nuStart int
+-	var seqNum uint16
++	builder := newAUBuilder(h264.JoinNALU(vps, sps, pps))
++	order := newReorder[*rtp.Packet](reorderMaxHeld, reorderMaxWait)
+ 
+-	return func(packet *rtp.Packet) {
++	depay := func(packet *rtp.Packet) {
+ 		data := packet.Payload
+ 		if len(data) < 3 {
+ 			return
+ 		}
+ 
+-		nuType := (data[0] >> 1) & 0x3F
+-		//log.Printf("[RTP] codec: %s, nalu: %2d, size: %6d, ts: %10d, pt: %2d, ssrc: %d, seq: %d, %v", track.Codec.Name, nuType, len(packet.Payload), packet.Timestamp, packet.PayloadType, packet.SSRC, packet.SequenceNumber, packet.Marker)
+-
+ 		// Fix for RtspServer https://github.com/AlexxIT/go2rtc/issues/244
+ 		if packet.Marker && len(data) < h264.PSMaxSize {
+-			switch nuType {
++			switch (data[0] >> 1) & 0x3F {
+ 			case NALUTypeVPS, NALUTypeSPS, NALUTypePPS:
+ 				packet.Marker = false
+ 			case NALUTypePrefixSEI, NALUTypeSuffixSEI:
+@@ -35,82 +32,28 @@
+ 			}
+ 		}
+ 
+-		// when we collect data into one buffer, we need to make sure
+-		// that all of it falls into the same sequence
+-		if len(buf) > 0 && packet.SequenceNumber-seqNum != 1 {
+-			//log.Printf("broken H265 sequence")
+-			buf = buf[:0] // drop data
++		au := builder.add(data, packet.Marker, packet.Timestamp)
++		if au == nil {
+ 			return
+ 		}
+ 
+-		seqNum = packet.SequenceNumber
+-
+-		if nuType == NALUTypeFU {
+-			switch data[2] >> 6 {
+-			case 0b10: // begin
+-				nuType = data[2] & 0x3F
+-
+-				// push PS data before keyframe
+-				if len(buf) == 0 && nuType >= 19 && nuType <= 21 {
+-					buf = append(buf, ps...)
+-				}
+-
+-				nuStart = len(buf)
+-				buf = append(buf, 0, 0, 0, 0) // NAL unit size
+-				buf = append(buf, (data[0]&0x81)|(nuType<<1), data[1])
+-				buf = append(buf, data[3:]...)
+-				return
+-			case 0b00: // continue
+-				if len(buf) == 0 {
+-					//log.Printf("broken H265 fragment")
+-					return
+-				}
+-
+-				buf = append(buf, data[3:]...)
+-				return
+-			case 0b01: // end
+-				if len(buf) == 0 {
+-					//log.Printf("broken H265 fragment")
+-					return
+-				}
+-
+-				buf = append(buf, data[3:]...)
+-
+-				if nuStart > len(buf)+4 {
+-					//log.Printf("broken H265 fragment")
+-					buf = buf[:0] // drop data
+-					return
+-				}
+-
+-				binary.BigEndian.PutUint32(buf[nuStart:], uint32(len(buf)-nuStart-4))
+-			case 0b11: // wrong RFC 7798 realisation from OpenIPC project
+-				// A non-fragmented NAL unit MUST NOT be transmitted in one FU; i.e.,
+-				// the Start bit and End bit must not both be set to 1 in the same FU
+-				// header.
+-				nuType = data[2] & 0x3F
+-				buf = binary.BigEndian.AppendUint32(buf, uint32(len(data))-1) // NAL unit size
+-				buf = append(buf, (data[0]&0x81)|(nuType<<1), data[1])
+-				buf = append(buf, data[3:]...)
+-			}
+-		} else {
+-			buf = binary.BigEndian.AppendUint32(buf, uint32(len(data))) // NAL unit size
+-			buf = append(buf, data...)
+-		}
+-
+-		// collect all NAL Units for Access Unit
+-		if !packet.Marker {
+-			return
+-		}
+-
+-		//log.Printf("[HEVC] %v, len: %d", Types(buf), len(buf))
+-
+ 		clone := *packet
+ 		clone.Version = h264.RTPPacketVersionAVC
+-		clone.Payload = buf
++		clone.Payload = au
++		handler(&clone)
++	}
+ 
+-		buf = buf[:0]
++	report := time.Now().Add(time.Minute)
+ 
+-		handler(&clone)
++	return func(packet *rtp.Packet) {
++		now := time.Now()
++		order.add(packet.SequenceNumber, packet, now, depay, builder.lost)
++
++		if now.After(report) {
++			report = now.Add(time.Minute)
++			log.Printf("[h265] frames=%d dropped=%d held=%d late=%d lost=%d",
++				builder.Frames, builder.Dropped, order.Held, order.Late, order.Lost)
++		}
+ 	}
+ }
+ 
+--- a/pkg/webrtc/conn.go
++++ b/pkg/webrtc/conn.go
+@@ -87,7 +87,9 @@
+ 			}
+ 		}
+ 
+-		if c.Mode == core.ModePassiveProducer && remote.Kind() == webrtc.RTPCodecTypeVideo {
++		// Ask for a keyframe every 2 seconds also when we called the camera: after a loss the picture stays frozen until the
++		// next keyframe, so they should not be far apart.
++		if (c.Mode == core.ModePassiveProducer || c.Mode == core.ModeActiveProducer) && remote.Kind() == webrtc.RTPCodecTypeVideo {
+ 			go func() {
+ 				pkts := []rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(remote.SSRC())}}
+ 				for range time.NewTicker(time.Second * 2).C {

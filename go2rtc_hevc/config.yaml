@@ -1,0 +1,24 @@
+name: go2rtc H.265
+description: go2rtc built from source with more robust H.265 reception over WebRTC. Runs next to the official add-on.
+version: 1.9.15-hevc.1
+slug: go2rtc_hevc
+url: https://github.com/niborb/ha-go2rtc-hevc
+arch:
+  - amd64
+  - aarch64
+init: false
+boot: manual
+startup: application
+host_network: true
+options:
+  api_port: 1985
+  api_username: go2rtc
+  api_password: ""
+  streams: []
+schema:
+  api_port: port
+  api_username: str
+  api_password: password
+  streams:
+    - name: str
+      url: password

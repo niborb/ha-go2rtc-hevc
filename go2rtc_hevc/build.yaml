@@ -1,0 +1,6 @@
+build_from:
+  amd64: ghcr.io/home-assistant/amd64-base:latest
+  aarch64: ghcr.io/home-assistant/aarch64-base:latest
+labels:
+  org.opencontainers.image.title: go2rtc H.265
+  org.opencontainers.image.source: https://github.com/niborb/ha-go2rtc-hevc
